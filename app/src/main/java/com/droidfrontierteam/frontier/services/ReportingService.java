@@ -3,7 +3,9 @@ package com.droidfrontierteam.frontier.services;
 import android.app.Notification;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.location.Location;
@@ -12,32 +14,43 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.os.Vibrator;
 import android.support.v4.app.NotificationCompat;
 import android.util.Log;
-import android.widget.Toast;
 
 import com.droidfrontierteam.frontier.FrontierApplication;
 import com.droidfrontierteam.frontier.MainActivity;
 import com.droidfrontierteam.frontier.R;
 import com.droidfrontierteam.frontier.location.KalmanLocationManager;
+import com.droidfrontierteam.frontier.utils.SharedPreferencesHelper;
 
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.TimeZone;
 
-public class ReportingService extends Service implements LocationListener {
+public class ReportingService extends Service implements
+        LocationListener,
+        SharedPreferences.OnSharedPreferenceChangeListener {
+
+    public static final HashMap<FrontierApplication.AlertLevel, Long> ALERT_TIMEOUTS = new HashMap<>();
     private static final String LOCK_TAG = "com.droidfrontierteam.frontier.lock";
     private static final DateFormat FORMATTER = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
     private static final String TIMEZONE = "UTC";
-    private static final int NANOS_IN_SECOND = 1000000;
     private static final long GPS_TIME = 500;
     private static final long NET_TIME = 3000;
     private static final long FILTER_TIME = 10000;
+    private static final int NANOS_IN_SECOND = 1000000000;
+    private static final int NANOS_IN_MILLISECOND = 1000000;
 
     static {
         FORMATTER.setTimeZone(TimeZone.getTimeZone(TIMEZONE));
+        ALERT_TIMEOUTS.put(FrontierApplication.AlertLevel.emergency, (long) 120 * NANOS_IN_SECOND);
+        ALERT_TIMEOUTS.put(FrontierApplication.AlertLevel.normal, (long) 1200 * NANOS_IN_SECOND);
     }
+
+    private long ALERT_TIMEOUT;
 
     private PowerManager.WakeLock mWakeLock;
     private Handler refreshTimer = null;
@@ -61,9 +74,16 @@ public class ReportingService extends Service implements LocationListener {
 
     private void handleIntent(Intent intent) {
         if (ACTION.START_FOREGROUND_ACTION.equals(intent.getAction())) {
-
             Log.d(FrontierApplication.LOG_TAG, "Received Start Foreground Intent");
-            FrontierApplication.getInstance().getSharedPreferencesHelper().setLastUpdateTime(System.nanoTime());
+            ALERT_TIMEOUT = ALERT_TIMEOUTS.get(
+                    FrontierApplication.AlertLevel.valueOf(
+                            FrontierApplication.getInstance().getSharedPreferencesHelper().getAlertLevel()
+                    )
+            );
+            FrontierApplication.getInstance().getSharedPreferencesHelper()
+                    .getPrefs().registerOnSharedPreferenceChangeListener(this);
+            FrontierApplication.getInstance().getSharedPreferencesHelper()
+                    .setLastUpdateTime(System.nanoTime());
             mKalmanLocationManager = new KalmanLocationManager(this);
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
             mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, LOCK_TAG);
@@ -79,14 +99,18 @@ public class ReportingService extends Service implements LocationListener {
 
             refreshRunnable = new Runnable() {
                 public void run() {
+                    long duration = System.nanoTime() - FrontierApplication
+                            .getInstance()
+                            .getSharedPreferencesHelper()
+                            .getLastUpdateTime();
+                    if (duration >= ALERT_TIMEOUT) {
+                        Vibrator v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+                        v.vibrate(500);
+                    }
+
                     startForeground(
                             NOTIFICATION_ID.FOREGROUND_SERVICE,
-                            buildNotification(
-                                    System.nanoTime() - FrontierApplication
-                                            .getInstance()
-                                            .getSharedPreferencesHelper()
-                                            .getLastUpdateTime()
-                            )
+                            buildNotification(duration)
                     );
                     refreshTimer.postDelayed(this, delay);
                 }
@@ -124,7 +148,7 @@ public class ReportingService extends Service implements LocationListener {
 
     private Notification buildNotification(long duration) {
 
-        duration = duration / NANOS_IN_SECOND;
+        duration = duration / NANOS_IN_MILLISECOND;
         Bitmap icon = BitmapFactory.decodeResource(getResources(),
                 R.mipmap.ic_launcher);
 
@@ -132,11 +156,6 @@ public class ReportingService extends Service implements LocationListener {
         notificationIntent.setAction(ACTION.MAIN_ACTION);
         notificationIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
         PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, notificationIntent, 0);
-
-        Intent updateIntent = new Intent(this, ReportingService.class);
-        updateIntent.setAction(ACTION.MAIN_ACTION);
-        PendingIntent pUpdateIntent = PendingIntent.getService(this, 0,
-                updateIntent, 0);
 
         return new NotificationCompat.Builder(this)
                 .setContentTitle(getString(R.string.app_name))
@@ -147,15 +166,17 @@ public class ReportingService extends Service implements LocationListener {
                         Bitmap.createScaledBitmap(icon, 128, 128, false))
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
-                .addAction(android.R.drawable.stat_notify_more,
-                        "Update", pUpdateIntent)
                 .build();
     }
 
     @Override
     public void onLocationChanged(Location location) {
         if (location.getProvider().equals(KalmanLocationManager.KALMAN_PROVIDER)) {
-            Toast.makeText(FrontierApplication.getInstance(), "Altitude ~= " + String.valueOf(Math.round(location.getAltitude())) + " m", Toast.LENGTH_SHORT).show();
+
+            //Toast.makeText(FrontierApplication.getInstance(),
+            //     "Altitude ~= " + String.valueOf(Math.round(location.getAltitude())) + " m"
+            //     , Toast.LENGTH_SHORT
+            //).show();
         }
     }
 
@@ -172,6 +193,19 @@ public class ReportingService extends Service implements LocationListener {
     @Override
     public void onProviderDisabled(String provider) {
 
+    }
+
+    @Override
+    public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key) {
+        switch (key) {
+            case SharedPreferencesHelper.ALERT_LEVEL_KEY:
+                ALERT_TIMEOUT = ALERT_TIMEOUTS.get(
+                        FrontierApplication.AlertLevel.valueOf(
+                                FrontierApplication.getInstance().getSharedPreferencesHelper().getAlertLevel()
+                        )
+                );
+                break;
+        }
     }
 
     public interface ACTION {

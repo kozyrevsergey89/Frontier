@@ -34,4 +34,8 @@ public class FrontierApplication extends Application {
         reportingServiceIntent.setAction(ReportingService.ACTION.START_FOREGROUND_ACTION);
         startService(reportingServiceIntent);
     }
+
+    public enum AlertLevel {
+        emergency, normal
+    }
 }
